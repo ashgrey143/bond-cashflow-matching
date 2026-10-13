@@ -1,0 +1,13 @@
+**/node_modules
+**/dist
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+.git
+.claude
+.DS_Store
+backend/data/cache/*.json
+*.md
+!README.md
+docker-compose*.yml
+Dockerfile*

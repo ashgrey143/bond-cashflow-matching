@@ -1,0 +1,18 @@
+# Production: one container serving the API and the dashboard on http://localhost:8000
+#   docker compose up -d --build
+services:
+  app:
+    build:
+      context: .
+      target: runtime
+    image: cashflow-matching:latest
+    container_name: cashflow-matching
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      # keeps CCIL live downloads between restarts (fallback when CCIL is unreachable)
+      - ccil-cache:/app/backend/data/cache
+    restart: unless-stopped
+
+volumes:
+  ccil-cache:

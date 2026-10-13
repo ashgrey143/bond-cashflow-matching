@@ -1,0 +1,30 @@
+# Development with hot reload: API on :8000, Vite dashboard on :5173
+#   docker compose -f docker-compose.dev.yml up --build
+services:
+  backend:
+    build:
+      context: .
+      target: base
+    working_dir: /app
+    command: python -m uvicorn api:app --app-dir backend --host 0.0.0.0 --port 8000 --reload --reload-dir backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app/backend
+
+  frontend:
+    image: node:20.18-alpine
+    working_dir: /frontend
+    command: sh -c "npm ci --no-audit --no-fund && npm run dev -- --host 0.0.0.0"
+    environment:
+      - API_PROXY=http://backend:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/frontend
+      - frontend-node-modules:/frontend/node_modules
+    depends_on:
+      - backend
+
+volumes:
+  frontend-node-modules:
