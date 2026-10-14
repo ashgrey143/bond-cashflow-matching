@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 import numpy as np
@@ -49,6 +49,7 @@ class Dataset:
 
 
 DATASETS: dict[str, Dataset] = {}
+MAX_DATASETS = 8
 
 
 def _register(source, label, raw) -> Dataset:
@@ -57,6 +58,9 @@ def _register(source, label, raw) -> Dataset:
         raise ValueError("The file has no fixed-coupon securities that can be used")
     ds = Dataset(uuid.uuid4().hex[:10], source, label, bonds, info)
     DATASETS[ds.id] = ds
+    others = [k for k, d in DATASETS.items() if d.source != "sample"]
+    for k in others[:-MAX_DATASETS]:
+        DATASETS.pop(k, None)
     return ds
 
 
@@ -83,6 +87,10 @@ def load_ccil(use_cache_on_error: bool = True) -> tuple[Dataset, str | None]:
     raw = data.normalise(data.read_ccil_json(payload))
     ds = _register("ccil", "Live: CCIL Trading Platform (latest trading days)", raw)
     return ds, note
+
+
+def money_cr(v: float) -> str:
+    return f"Rs {v / CRORE:,.2f} cr" if abs(v) >= CRORE else f"Rs {v / 1e5:,.1f} lakh"
 
 
 # ------------------------------------------------------------------ JSON helpers
@@ -131,9 +139,20 @@ def run(ds: Dataset, liabilities: list[dict], options: dict | None = None,
 
     liab_in = pd.DataFrame(liabilities or [], columns=["date", "amount"])
     liab = prep_liabilities(liab_in, settle)
-    dropped = len(liab_in.dropna()) - len(liab)
-    if dropped > 0:
-        warnings.append(f"{dropped} payment(s) on or before settlement ({settle:%d-%b-%Y}) or with no amount were ignored.")
+    li = liab_in.assign(date=pd.to_datetime(liab_in["date"], errors="coerce"),
+                        amount=pd.to_numeric(liab_in["amount"], errors="coerce"))
+    valid = li.dropna()
+    valid = valid[valid["amount"] > 0]
+    early = int((valid["date"] <= settle).sum())
+    blank = len(li) - len(valid)
+    merged = int(len(valid[valid["date"] > settle]) - len(liab))
+    if early:
+        warnings.append(f"{early} payment(s) on or before settlement ({settle:%d-%b-%Y}) were ignored: "
+                        "bonds bought now can't pay them.")
+    if blank:
+        warnings.append(f"{blank} payment row(s) with no date or no amount were ignored.")
+    if merged:
+        warnings.append(f"{merged} payment(s) share a date with another and were added together.")
     liab_list = [{"date": d, "amount": a} for d, a in zip(liab["date"], liab["amount"])]
 
     t_grid = np.linspace(0.1, max(1.0, float(ds.enriched["years"].max())), 80)
@@ -160,6 +179,13 @@ def run(ds: Dataset, liabilities: list[dict], options: dict | None = None,
         warnings.append(f"Existing holdings not found in the data and ignored: {', '.join(m.missing_holdings)}.")
     if m.integer:
         warnings.append("Whole lots are on: shadow prices are taken from the fractional (LP) version of the model.")
+    leftover = float(sched["carried_out"].iloc[-1])
+    resid_pre = residual_value(hold, ds.cfs, eb, sched["date"].max())
+    if res["cost"] > 0 and (leftover + resid_pre) > 0.05 * res["cost"]:
+        warnings.append(
+            f"The plan buys more than the payments need: {money_cr(leftover)} cash is left after the last payment and "
+            f"bonds worth {money_cr(resid_pre)} today mature after it. Usually caused by large lots, a strict "
+            "per-bond limit or filters that leave only long bonds; loosen them to cut the cost.")
     n_illiq = int((hold["liquidity"] == "Illiquid").sum())
     if n_illiq:
         warnings.append(f"{n_illiq} selected bond(s) need more than the whole day's traded volume.")
@@ -168,7 +194,7 @@ def run(ds: Dataset, liabilities: list[dict], options: dict | None = None,
     prisk = an.portfolio_risk(hold)
     lrisk = an.liability_risk(sched, ds.curve, settle, col="required")
     cal, cal_stats = an.cash_calendar(hold, ds.cfs, sched, opts, settle)
-    resid = residual_value(hold, ds.cfs, eb, sched["date"].max())
+    resid = resid_pre
 
     out.update({
         "holdings": records(hold), "schedule": records(sched),
@@ -201,13 +227,22 @@ def run(ds: Dataset, liabilities: list[dict], options: dict | None = None,
     out["warnings"] = warnings
 
     if full:
-        ctx = {"bonds": eb, "cfs": cfs, "cfs_all": ds.cfs, "liabilities": liab_list, "opts": opts, "settle": settle}
+        ctx_opts = replace(opts, lot_face=0.0) if m.integer else opts
+        if m.integer:
+            warnings.append("What-if, strategies and limit curves use fractional amounts (no lots) so they stay fast.")
+        ctx = {"bonds": eb, "cfs": cfs, "cfs_all": ds.cfs, "liabilities": liab_list, "opts": ctx_opts, "settle": settle}
+        if m.integer:  # compare like with like: re-solve the base without lots for these views
+            res = {**optimise(eb, cfs, liab_list, ctx_opts, settle, ds.cfs, duals=False), "lots_result": res}
+            res["portfolio_value_dirty"] = float((res["holdings"]["dirty"] * res["holdings"]["units"]).sum()) \
+                if res["status"] != "infeasible" else 0.0
         strat = an.strategies(ctx, res, lrisk) if res["status"] == "optimal" else []
         manual = next((s for s in strat if s["name"] == "Manual selection" and s.get("available")), None)
         if manual:
             summary["manual_cost"] = manual["cost"]
             summary["savings_vs_manual"] = manual["cost"] - res["cost"]
             summary["savings_pct"] = (manual["cost"] / res["cost"] - 1) * 100 if res["cost"] else 0
+            if m.integer:
+                summary["savings_note"] = "compared without lots"
         out.update({
             "scenarios": _clean(an.scenarios(ctx, res, custom)) if res["status"] == "optimal" else [],
             "uncertainty": _clean(an.uncertainty(ctx, res)) if res["status"] == "optimal" else [],
@@ -226,9 +261,13 @@ def run_custom(ds: Dataset, liabilities, options, filters, custom: dict) -> dict
     cfs = ds.cfs[ds.cfs["isin"].isin(eb["isin"])]
     liab = prep_liabilities(pd.DataFrame(liabilities, columns=["date", "amount"]), ds.settle)
     liab_list = [{"date": d, "amount": a} for d, a in zip(liab["date"], liab["amount"])]
+    if not liab_list:
+        return {"name": "Custom scenario", "status": "infeasible", "description": "",
+                "message": "Add at least one payment after the settlement date."}
     base = optimise(eb, cfs, liab_list, opts, ds.settle, ds.cfs, duals=False)
-    if base["status"] != "optimal":
-        return {"status": base["status"], "message": base.get("message", "")}
+    if base["status"] == "infeasible":
+        return {"name": "Custom scenario", "status": "infeasible", "description": "",
+                "message": base.get("message", "")}
     base["portfolio_value_dirty"] = float((base["holdings"]["dirty"] * base["holdings"]["units"]).sum())
     ctx = {"bonds": eb, "cfs": cfs, "cfs_all": ds.cfs, "liabilities": liab_list, "opts": opts, "settle": ds.settle}
     return _clean(an.custom_scenario(ctx, base, **custom))

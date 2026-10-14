@@ -24,7 +24,9 @@ export function SummaryHero({ r }: { r: Result }) {
           <div>
             <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{ok ? "All payments covered" : "Not fully covered"}</div>
             <h2 className="mt-1 text-lg font-semibold leading-snug tracking-tight lg:text-xl">
-              {ok ? (
+              {ok && s.bonds_used === 0 ? (
+                <>The bonds you already hold cover all {s.payments} payments ({money(s.required_total)}). Nothing new to buy.</>
+              ) : ok ? (
                 <>All {s.payments} payments ({money(s.required_total)}) are covered for <span className="text-primary">{money(s.cost)}</span> today, using {s.bonds_used} bonds.</>
               ) : (
                 <>{money(s.cost)} covers {ratioPct(1 - s.shortfall / s.required_total, 0)} of the payments. {money(s.shortfall)} is still uncovered{firstGap ? `, starting ${date(firstGap.date)}` : ""}.</>
@@ -54,7 +56,7 @@ export function KpiGrid({ r }: { r: Result }) {
         sub={premium != null ? `cash-matching costs ${pct(premium, 2)} more` : `on the G-Sec curve`}
         hint={<Hint>Present value of the payments on the fitted G-Sec zero curve. The gap to the investment is the price of certainty: exact timing instead of having to sell bonds later.</Hint>} />
       <Stat icon={<PiggyBank />} label="Saving vs manual" value={s.savings_vs_manual != null ? money(s.savings_vs_manual) : "—"}
-        sub={s.savings_pct != null ? `${pct(s.savings_pct, 2)} less than the manual pick` : "needs full coverage"} tone={s.savings_vs_manual && s.savings_vs_manual > 0 ? "good" : undefined} />
+        sub={s.savings_pct != null ? `${pct(s.savings_pct, 2)} less than the manual pick${s.savings_note ? ` (${s.savings_note})` : ""}` : "needs full coverage"} tone={s.savings_vs_manual && s.savings_vs_manual > 0 ? "good" : undefined} />
       <Stat icon={<Layers />} label="Bonds used" value={s.bonds_used} sub={`of ${s.eligible_bonds} eligible`} />
       <Stat icon={s.min_coverage >= 0.9999 ? <CheckCircle2 /> : <XCircle />} label="Lowest coverage" value={ratioPct(s.min_coverage, 0)}
         tone={s.min_coverage >= 0.9999 ? "good" : "critical"} sub={s.shortfall > 0 ? `${money(s.shortfall)} short` : "every payment met"} />

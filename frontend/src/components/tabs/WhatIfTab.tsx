@@ -1,13 +1,14 @@
 import * as React from "react";
 import { Bar, BarChart, CartesianGrid, Cell, LabelList, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { FlaskConical, Loader2, Play } from "lucide-react";
+import { FlaskConical, Loader2, Play, RotateCcw } from "lucide-react";
 import { ChartCard, Legend, S, TipBox, axisProps, gridProps } from "@/components/charts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
+import { Alert } from "@/components/ui/misc";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
-import { axisCr, money, num, pct, ratioPct, shortName } from "@/lib/format";
+import { axisCr, date, money, num, pct, ratioPct, shortName } from "@/lib/format";
 import type { Result, Scenario } from "@/lib/types";
 
 export function WhatIfTab({ r, runCustom }: { r: Result; runCustom: (c: Record<string, unknown>) => Promise<Scenario> }) {
@@ -23,7 +24,11 @@ export function WhatIfTab({ r, runCustom }: { r: Result; runCustom: (c: Record<s
   // a new optimisation makes the last custom result stale
   React.useEffect(() => setCustom(null), [r]);
 
-  const data = sc.filter((s) => s.cost != null).map((s) => ({ name: s.name, cost: s.cost!, delta: s.delta_pct ?? 0, s }));
+  const [ranWith, setRanWith] = React.useState("");
+  const inputsKey = JSON.stringify({ rate, liab, shift, remove });
+  const stale = custom != null && ranWith !== inputsKey;
+  const allSc = custom && custom.status !== "infeasible" ? [...sc, custom] : sc;
+  const data = allSc.filter((s) => s.cost != null).map((s) => ({ name: s.name, cost: s.cost!, delta: s.delta_pct ?? 0, s }));
   const isins = (r.holdings ?? []).map((h) => ({ isin: h.isin, name: shortName(h.description) }));
 
   return (
@@ -48,7 +53,7 @@ export function WhatIfTab({ r, runCustom }: { r: Result; runCustom: (c: Record<s
                 ]} footer={s.description} />;
               }} />
               <Bar dataKey="delta" radius={4} maxBarSize={26}>
-                {data.slice(1).map((d) => <Cell key={d.name} fill={d.delta > 0 ? S[7] : S[0]} />)}
+                {data.slice(1).map((d) => <Cell key={d.name} fill={d.delta > 0 ? S[7] : S[0]} fillOpacity={d.name === "Custom scenario" ? 0.7 : 1} />)}
                 <LabelList dataKey="cost" content={(p) => {
                   const { x = 0, y = 0, width = 0, height = 0, value } = p as { x?: number; y?: number; width?: number; height?: number; value?: number };
                   const neg = Number(width) < 0;
@@ -79,29 +84,117 @@ export function WhatIfTab({ r, runCustom }: { r: Result; runCustom: (c: Record<s
                 ))}
               </div>
             </div>
-            <Button className="w-full" disabled={busy} onClick={async () => {
-              setBusy(true);
-              try { setCustom(await runCustom({ rate_bp: rate, liab_pct: liab, shift_days: shift, remove })); } finally { setBusy(false); }
-            }}>
-              {busy ? <Loader2 className="animate-spin" /> : <Play />} Run scenario
-            </Button>
+            <div className="flex gap-2">
+              <Button className="flex-1" disabled={busy} onClick={async () => {
+                setBusy(true);
+                try {
+                  setCustom(await runCustom({ rate_bp: rate, liab_pct: liab, shift_days: shift, remove }));
+                  setRanWith(inputsKey);
+                } finally { setBusy(false); }
+              }}>
+                {busy ? <Loader2 className="animate-spin" /> : <Play />} Run scenario
+              </Button>
+              <Button variant="outline" disabled={busy} onClick={() => { setRate(0); setLiab(0); setShift(0); setRemove([]); setCustom(null); }}>
+                <RotateCcw /> Reset
+              </Button>
+            </div>
             {custom && (
-              <div className="rounded-lg border bg-muted/30 p-3 text-[12.5px]">
-                <div className="mb-1.5 font-medium">{custom.description}</div>
+              <div className={`rounded-lg border bg-muted/30 p-3 text-[12.5px] ${stale ? "opacity-60" : ""}`}>
+                <div className="mb-1.5 flex items-start justify-between gap-2">
+                  <span className="font-medium">{custom.description}</span>
+                  {stale && <Badge variant="warn" className="shrink-0 whitespace-nowrap">Changed, run again</Badge>}
+                </div>
                 {custom.status === "infeasible" ? <div className="text-[var(--status-critical)]">{custom.message}</div> : (
                   <div className="grid grid-cols-2 gap-y-1">
                     <span className="text-muted-foreground">New cost</span><span className="text-right font-semibold tnum">{money(custom.cost)}</span>
-                    <span className="text-muted-foreground">Change vs base</span><span className="text-right tnum">{money(custom.delta_cost)} ({pct(custom.delta_pct, 2)})</span>
+                    <span className="text-muted-foreground">Change vs base</span>
+                    <span className={`text-right tnum ${(custom.delta_cost ?? 0) > 0 ? "text-[var(--status-critical)]" : "text-[var(--good-text)]"}`}>
+                      {(custom.delta_cost ?? 0) > 0 ? "+" : ""}{money(custom.delta_cost)} ({pct(custom.delta_pct, 2)})
+                    </span>
                     <span className="text-muted-foreground">Bonds used</span><span className="text-right tnum">{custom.bonds_used}</span>
-                    <span className="text-muted-foreground">Base portfolio still covers</span>
-                    <span className="text-right tnum">{ratioPct(custom.base_portfolio_coverage, 0)} {custom.base_portfolio_shortfall ? `(short ${money(custom.base_portfolio_shortfall)})` : ""}</span>
+                    <span className="text-muted-foreground">Payments covered</span><span className="text-right tnum">{ratioPct(custom.min_coverage, 0)}</span>
+                    <span className="col-span-2 mt-1.5 border-t pt-1.5 text-muted-foreground">
+                      {custom.base_without_removed ? "Today's plan without the unavailable bonds" : "Today's plan, unchanged"}:{" "}
+                      <span className="text-foreground">
+                        {(custom.base_portfolio_coverage ?? 0) >= 0.9999 ? "still covers every payment"
+                          : `covers ${ratioPct(custom.base_portfolio_coverage, 0)} at worst, short ${money(custom.base_portfolio_shortfall)}`}
+                      </span>
+                    </span>
                   </div>
                 )}
+                {custom.status !== "infeasible" && <div className="mt-2 text-[11px] text-muted-foreground">Full plan below; also added to the chart and comparison table.</div>}
               </div>
             )}
           </div>
         </ChartCard>
       </div>
+
+      {custom && custom.status !== "infeasible" && custom.holdings && (
+        <ChartCard title="Custom scenario: the new plan"
+          description={`Re-optimised from scratch over all eligible bonds (${custom.description}). Compared with today's plan.`}
+          right={stale ? <Badge variant="warn" className="whitespace-nowrap">Changed, run again</Badge> : undefined}
+          contentClassName="p-0">
+          {custom.message && <div className="px-5 pb-3"><Alert tone="warn">{custom.message}</Alert></div>}
+          <div className="grid gap-0 xl:grid-cols-5">
+            <div className="xl:col-span-3 xl:border-r">
+              <Table>
+                <THead><TR><TH>Bond selected</TH><TH>Maturity</TH><TH className="text-right">Face value</TH>
+                  <TH className="text-right">vs today</TH><TH className="text-right">Cost</TH><TH className="text-right">Yield</TH></TR></THead>
+                <TBody>
+                  {custom.holdings.map((h) => {
+                    const d = h.face - h.base_face;
+                    return (
+                      <TR key={h.isin}>
+                        <TD><div className="flex items-center gap-1.5 font-medium">{shortName(h.description)}
+                          {h.base_face === 0 && <Badge>new</Badge>}</div>
+                          <div className="text-[11px] text-muted-foreground">{h.isin}</div></TD>
+                        <TD>{date(h.maturity)}</TD>
+                        <TD className="text-right font-medium">{money(h.face)}</TD>
+                        <TD className={`text-right ${Math.abs(d) < 1 ? "text-muted-foreground" : d > 0 ? "text-[var(--status-critical)]" : "text-[var(--good-text)]"}`}>
+                          {Math.abs(d) < 1 ? "same" : `${d > 0 ? "+" : "−"}${money(Math.abs(d))}`}</TD>
+                        <TD className="text-right">{money(h.cost)}</TD>
+                        <TD className="text-right">{pct(h.yield, 2)}</TD>
+                      </TR>
+                    );
+                  })}
+                  {custom.dropped?.map((h) => (
+                    <TR key={h.isin} className="opacity-70">
+                      <TD><div className="flex items-center gap-1.5 font-medium line-through">{shortName(h.description)}</div>
+                        <div className="text-[11px] text-muted-foreground">{h.isin} · no longer used</div></TD>
+                      <TD>—</TD><TD className="text-right">—</TD>
+                      <TD className="text-right text-[var(--good-text)]">−{money(h.base_face)}</TD><TD className="text-right">—</TD><TD />
+                    </TR>
+                  ))}
+                  <TR className="bg-muted/40 font-medium">
+                    <TD>Total</TD><TD /><TD className="text-right">{money(custom.holdings.reduce((a, h) => a + h.face, 0))}</TD><TD />
+                    <TD className="text-right">{money(custom.cost)}</TD><TD />
+                  </TR>
+                </TBody>
+              </Table>
+            </div>
+            <div className="xl:col-span-2">
+              <Table>
+                <THead><TR><TH>Payment</TH><TH className="text-right">Due</TH><TH className="text-right">Paid</TH><TH>Status</TH></TR></THead>
+                <TBody>
+                  {custom.schedule?.map((p) => (
+                    <TR key={p.date}>
+                      <TD>{date(p.date)}</TD>
+                      <TD className="text-right">{money(p.required)}</TD>
+                      <TD className="text-right">{money(p.paid)}</TD>
+                      <TD>{p.shortfall > 0.5 ? <Badge variant="critical">{ratioPct(p.coverage, 0)}</Badge> : <Badge variant="good">Covered</Badge>}</TD>
+                    </TR>
+                  ))}
+                </TBody>
+              </Table>
+              <div className="grid grid-cols-2 gap-y-1 border-t px-5 py-3 text-[12.5px]">
+                <span className="text-muted-foreground">Modified duration</span><span className="text-right tnum">{num(custom.mod_dur)}</span>
+                <span className="text-muted-foreground">Convexity</span><span className="text-right tnum">{num(custom.convexity, 1)}</span>
+                <span className="text-muted-foreground">Bonds used</span><span className="text-right tnum">{custom.bonds_used}</span>
+              </div>
+            </div>
+          </div>
+        </ChartCard>
+      )}
 
       <ChartCard title="Scenario comparison" description="Compared with the base allocation." contentClassName="p-0">
         <Table>
@@ -110,8 +203,8 @@ export function WhatIfTab({ r, runCustom }: { r: Result; runCustom: (c: Record<s
               <TH className="text-right">Coverage</TH><TH className="text-right">Mod. dur</TH><TH className="text-right">Convexity</TH><TH>What happens to today's portfolio</TH></TR>
           </THead>
           <TBody>
-            {sc.map((s) => (
-              <TR key={s.name}>
+            {allSc.map((s) => (
+              <TR key={s.name} className={s.name === "Custom scenario" ? "bg-primary/5" : ""}>
                 <TD><div className="font-medium">{s.name}</div><div className="text-[11px] text-muted-foreground">{s.description}</div></TD>
                 <TD className="text-right font-medium">{money(s.cost)}</TD>
                 <TD className="text-right">{s.name === "Base case" ? "—" : `${pct(s.delta_pct, 2)}`}</TD>
@@ -124,7 +217,7 @@ export function WhatIfTab({ r, runCustom }: { r: Result; runCustom: (c: Record<s
             ))}
           </TBody>
         </Table>
-        {base?.units && <QuantityTable scenarios={sc} names={Object.fromEntries((r.universe ?? []).map((b) => [b.isin, b.description]))} />}
+        {base?.units && <QuantityTable scenarios={allSc} names={Object.fromEntries((r.universe ?? []).map((b) => [b.isin, b.description]))} />}
       </ChartCard>
 
       <div className="grid gap-4 xl:grid-cols-2">
@@ -171,8 +264,11 @@ export function WhatIfTab({ r, runCustom }: { r: Result; runCustom: (c: Record<s
 
 function impact(s: Scenario): string {
   if (s.base_value_change_pct != null) return `Market value ${pct(s.base_value_change_pct, 2)} to ${money(s.base_portfolio_value)}. ${s.note ?? ""}`;
-  if (s.base_portfolio_coverage != null)
-    return s.base_portfolio_coverage >= 0.9999 ? "Still covers every payment." : `Covers ${ratioPct(s.base_portfolio_coverage, 0)} at worst; short ${money(s.base_portfolio_shortfall)} in total.`;
+  if (s.base_portfolio_coverage != null) {
+    const who = s.base_without_removed ? "Without the unavailable bonds it " : "";
+    return s.base_portfolio_coverage >= 0.9999 ? `${who || ""}${who ? "still covers" : "Still covers"} every payment.`
+      : `${who}${who ? "covers" : "Covers"} ${ratioPct(s.base_portfolio_coverage, 0)} at worst; short ${money(s.base_portfolio_shortfall)} in total.`;
+  }
   if (s.removed) return `Replaced ${s.removed}.`;
   if (s.name === "Base case") return "—";
   return s.message ?? "";

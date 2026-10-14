@@ -65,7 +65,11 @@ export interface Scenario {
   bonds_used?: number; min_coverage?: number; mod_dur?: number; convexity?: number;
   units?: Record<string, number>; message?: string; base_portfolio_value?: number;
   base_value_change_pct?: number; base_portfolio_coverage?: number; base_portfolio_shortfall?: number;
-  note?: string; removed?: string;
+  note?: string; removed?: string; base_without_removed?: boolean;
+  holdings?: { isin: string; description: string; maturity: string; coupon: number; face: number; cost: number;
+               dirty: number; yield: number; weight: number; base_face: number }[];
+  dropped?: { isin: string; description: string; base_face: number }[];
+  schedule?: { date: string; required: number; paid: number; shortfall: number; coverage: number }[];
 }
 
 export interface Strategy {
@@ -81,7 +85,7 @@ export interface Summary {
   liability_convexity: number; portfolio_yield: number; avg_wait_days: number; avg_idle_balance: number;
   max_idle_balance: number; first_payment: string; last_payment: string; eligible_bonds: number;
   illiquid: number; watch: number; data_date: string; manual_cost?: number; savings_vs_manual?: number;
-  savings_pct?: number;
+  savings_pct?: number; savings_note?: string;
 }
 
 export interface Result {

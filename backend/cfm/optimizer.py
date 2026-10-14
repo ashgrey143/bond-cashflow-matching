@@ -102,7 +102,7 @@ def _solve(c, A_eq, b_eq, A_ub, b_ub, bounds, integrality=None):
         lb = np.array([b[0] for b in bounds], float)
         ub = np.array([np.inf if b[1] is None else b[1] for b in bounds], float)
         res = milp(c, constraints=cons, integrality=integrality, bounds=Bounds(lb, ub),
-                   options={"time_limit": 30, "mip_rel_gap": 1e-6})
+                   options={"time_limit": 15, "mip_rel_gap": 1e-4})
         return (res.x if res.status in (0, 1) and res.x is not None else None), None
     res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method="highs")
     return (res.x if res.status == 0 else None), (res if res.status == 0 else None)
@@ -291,7 +291,9 @@ def _duals(m: Model, lp) -> dict:
     n = m.n
     pi = np.asarray(lp.eqlin.marginals)
     settle_years = np.array([(d - m.settle).days / 365 for d in m.dates])
-    implied = np.where((pi > 0) & (settle_years > 0), pi ** (-1 / np.maximum(settle_years, 1e-9)) - 1, np.nan)
+    ok = (pi > 0) & (settle_years > 0)   # a zero shadow price (date already funded) has no implied rate
+    implied = np.full(len(pi), np.nan)
+    implied[ok] = pi[ok] ** (-1 / settle_years[ok]) - 1
     dual = pd.DataFrame({"date": m.dates, "shadow_price": pi, "implied_rate": implied * 100,
                          "years": settle_years})
     rc = np.asarray(lp.lower.marginals)[:n] / m.k

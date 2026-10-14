@@ -78,7 +78,11 @@ def cash_calendar(hold, cfs_all, liab_sched, opts: Options, settle) -> tuple[pd.
     cal = pd.DataFrame({"month": months})
     cal["inflow"] = cal["month"].map(inflow.groupby(inflow["date"].dt.to_period("M"))["inflow"].sum()).fillna(0)
     cal["payment"] = cal["month"].map(liab_sched.groupby(liab_sched["date"].dt.to_period("M"))["paid"].sum()).fillna(0)
-    cal["balance"] = (cal["inflow"] - cal["payment"]).cumsum().clip(lower=0)
+    bal, run = 0.0, []
+    for i, o in zip(cal["inflow"], cal["payment"]):
+        bal = max(0.0, bal + i - o)   # payments can also draw on reinvestment interest
+        run.append(bal)
+    cal["balance"] = run
     cal["month"] = cal["month"].astype(str)
 
     # how long each rupee waits between arriving and being paid out
@@ -179,7 +183,7 @@ def scenarios(ctx, base: dict, custom: dict | None = None) -> list[dict]:
         out.append(_scenario_row(
             f"Rates {'+' if bp > 0 else '−'}0.5%", f"All yields {'rise' if bp > 0 else 'fall'} by 50 bp; re-optimised",
             res, base_cost, {"base_portfolio_value": val,
-                             "base_value_change_pct": (val / base["portfolio_value_dirty"] - 1) * 100,
+                             "base_value_change_pct": (val / base["portfolio_value_dirty"] - 1) * 100 if base["portfolio_value_dirty"] else 0.0,
                              "note": "Your base portfolio still pays every liability: its cash flows do not change."}))
 
     up = [{"date": l["date"], "amount": l["amount"] * 1.10} for l in liab]
@@ -190,11 +194,14 @@ def scenarios(ctx, base: dict, custom: dict | None = None) -> list[dict]:
                               "base_portfolio_shortfall": float(sim["shortfall"].sum())}))
 
     early = [{"date": pd.Timestamp(l["date"]) - pd.Timedelta(days=91), "amount": l["amount"]} for l in liab]
-    res = optimise(bonds, cfs, early, opts, settle, cfs_all, duals=False)
-    sim = simulate(base_units, cfs_all, early, opts, settle)
-    out.append(_scenario_row("Payments 3 months earlier", "Each payment falls due 91 days sooner", res, base_cost,
-                             {"base_portfolio_coverage": float(sim["coverage"].min()),
-                              "base_portfolio_shortfall": float(sim["shortfall"].sum())}))
+    msg = _too_early(early, settle)
+    res = {"status": "infeasible", "message": msg} if msg else optimise(bonds, cfs, early, opts, settle, cfs_all, duals=False)
+    extra = {}
+    if not msg:
+        sim = simulate(base_units, cfs_all, early, opts, settle)
+        extra = {"base_portfolio_coverage": float(sim["coverage"].min()),
+                 "base_portfolio_shortfall": float(sim["shortfall"].sum())}
+    out.append(_scenario_row("Payments 3 months earlier", "Each payment falls due 91 days sooner", res, base_cost, extra))
 
     if len(base["holdings"]):
         top = base["holdings"].sort_values("cost").iloc[-1]
@@ -216,21 +223,55 @@ def custom_scenario(ctx, base, rate_bp=0.0, liab_pct=0.0, shift_days=0, remove=N
         bonds = _shift_prices(bonds, cfs, rate_bp)
     liab = [{"date": pd.Timestamp(l["date"]) + pd.Timedelta(days=int(shift_days)),
              "amount": l["amount"] * (1 + liab_pct / 100)} for l in ctx["liabilities"]]
-    res = optimise(bonds, cfs, liab, ctx["opts"], ctx["settle"], ctx["cfs_all"], duals=False)
-    base_units = base["holdings"].set_index("isin")["units"]
-    sim = simulate(base_units, ctx["cfs_all"], liab, ctx["opts"], ctx["settle"])
     parts = []
     if rate_bp:
         parts.append(f"rates {rate_bp:+g} bp")
     if liab_pct:
         parts.append(f"liabilities {liab_pct:+g}%")
     if shift_days:
-        parts.append(f"payments {shift_days:+d} days")
+        parts.append(f"payments {abs(shift_days)} days {'earlier' if shift_days < 0 else 'later'}")
     if remove:
-        parts.append(f"{len(remove)} bond(s) removed")
-    return _scenario_row("Custom scenario", ", ".join(parts) or "No change", res, base["cost"],
-                         {"base_portfolio_coverage": float(sim["coverage"].min()),
-                          "base_portfolio_shortfall": float(sim["shortfall"].sum())})
+        parts.append(f"{len(remove)} bond(s) unavailable")
+    desc = ", ".join(parts) or "No change"
+    too_early = _too_early(liab, ctx["settle"])
+    if too_early:
+        return {"name": "Custom scenario", "description": desc, "status": "infeasible", "message": too_early}
+
+    res = optimise(bonds, cfs, liab, ctx["opts"], ctx["settle"], ctx["cfs_all"], duals=False)
+    # today's plan, minus any bonds that are now unavailable
+    base_units = base["holdings"].set_index("isin")["units"]
+    if remove:
+        base_units = base_units.drop(index=[i for i in remove if i in base_units.index])
+    sim = simulate(base_units, ctx["cfs_all"], liab, ctx["opts"], ctx["settle"])
+    row = _scenario_row("Custom scenario", desc, res, base["cost"],
+                        {"base_portfolio_coverage": float(sim["coverage"].min()),
+                         "base_portfolio_shortfall": float(sim["shortfall"].sum()),
+                         "base_without_removed": bool(remove)})
+    if res["status"] in ("optimal", "shortfall"):
+        base_face = base["holdings"].set_index("isin")["face"]
+        h = res["holdings"]
+        row["holdings"] = [{
+            **{k: x[k] for k in ("isin", "description", "maturity", "coupon", "face", "cost", "dirty", "yield", "weight")},
+            "base_face": float(base_face.get(x["isin"], 0.0)),
+        } for x in h.to_dict("records")]
+        row["dropped"] = [{"isin": i, "description": base["holdings"].set_index("isin").loc[i, "description"],
+                           "base_face": float(f)} for i, f in base_face.items() if i not in set(h["isin"])]
+        row["schedule"] = [{"date": d, "required": q, "paid": p, "shortfall": u, "coverage": c}
+                           for d, q, p, u, c in zip(res["schedule"]["date"], res["schedule"]["required"],
+                                                     res["schedule"]["paid"], res["schedule"]["shortfall"],
+                                                     res["schedule"]["coverage"])]
+        row["message"] = res.get("message", "")
+    return row
+
+
+def _too_early(liab, settle) -> str:
+    """Message if shifted payments fall on/before settlement (bonds bought now can't fund them)."""
+    early = [l for l in liab if pd.Timestamp(l["date"]) <= settle]
+    if not early:
+        return ""
+    first = min(pd.Timestamp(l["date"]) for l in early)
+    return (f"{len(early)} payment(s) would fall due on or before settlement ({settle:%d %b %Y}), the first on "
+            f"{first:%d %b %Y}. Bonds bought now can't pay them; shift the payments less.")
 
 
 def uncertainty(ctx, base, factors=(0.8, 0.9, 1.0, 1.1, 1.2, 1.3)) -> list[dict]:
@@ -239,7 +280,8 @@ def uncertainty(ctx, base, factors=(0.8, 0.9, 1.0, 1.1, 1.2, 1.3)) -> list[dict]
     rows = []
     for f in factors:
         liab = [{"date": l["date"], "amount": l["amount"] * f} for l in ctx["liabilities"]]
-        res = optimise(ctx["bonds"], ctx["cfs"], liab, ctx["opts"], ctx["settle"], ctx["cfs_all"], duals=False)
+        res = optimise(ctx["bonds"], ctx["cfs"], liab, replace(ctx["opts"], budget=None), ctx["settle"],
+                       ctx["cfs_all"], duals=False)
         sim = simulate(base_units, ctx["cfs_all"], liab, ctx["opts"], ctx["settle"])
         rows.append({"factor": f, "label": f"{(f - 1) * 100:+.0f}%" if f != 1 else "Base",
                      "cost": res.get("cost"), "status": res["status"],

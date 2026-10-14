@@ -176,3 +176,75 @@ def test_api_flow():
     up = c.post("/api/liabilities/parse",
                 files={"file": ("l.csv", b"Date,Amount (Rs cr)\n31-03-2027,1.5\n31-03-2028,2\n", "text/csv")}).json()
     assert up["liabilities"][0] == {"date": "2027-03-31", "amount": 1.5e7}
+
+
+# ------------------------------------------------------------- custom scenario
+
+def test_custom_scenario_rejects_payments_before_settlement():
+    raw = data.normalise(data.read_ccil_json(LIVE.read_text()))
+    ds = service._register("ccil", "live", raw)              # settles 13 Oct 2026
+    L = service.default_liabilities(ds.settle)                # first payment 31 Mar 2027
+    r = service.run_custom(ds, L, {}, {}, {"shift_days": -180})
+    assert r["status"] == "infeasible" and "on or before settlement" in r["message"]
+    ok = service.run_custom(ds, L, {}, {}, {"shift_days": -150})
+    assert ok["status"] == "optimal"
+
+
+def test_custom_scenario_unavailable_bonds_leave_gaps_in_todays_plan():
+    ds = service.load_sample()
+    L = service.default_liabilities(ds.settle)
+    base = service.run(ds, L, full=False)
+    first = base["holdings"][0]["isin"]                       # funds the first payment
+    r = service.run_custom(ds, L, {}, {}, {"remove": [first]})
+    assert r["status"] == "optimal" and r["base_without_removed"]
+    assert r["base_portfolio_coverage"] < 1                   # today's plan minus that bond falls short
+    assert first not in r["units"]                            # and the new plan doesn't use it
+
+
+# ------------------------------------------------------------- regressions from the full review
+
+def test_existing_holdings_covering_everything_does_not_crash():
+    ds = service.load_sample()
+    L = service.default_liabilities(ds.settle)
+    r = service.run(ds, L, {"holdings": [{"isin": "IN0020250141", "face": 5e8}]})
+    assert r["status"] == "optimal" and r["summary"]["bonds_used"] == 0 and r["summary"]["covered_all"]
+    json.dumps(r)
+
+
+def test_same_date_payments_are_merged_with_accurate_warning():
+    ds = service.load_sample()
+    L = service.default_liabilities(ds.settle)
+    r = service.run(ds, L + [{"date": L[0]["date"], "amount": 5e6}], full=False)
+    assert r["schedule"][0]["liability"] == pytest.approx(1.5e7)
+    assert any("added together" in w for w in r["warnings"])
+    assert not any("ignored" in w for w in r["warnings"])
+
+
+def test_custom_scenario_returns_full_plan_and_works_under_budget():
+    ds = service.load_sample()
+    L = service.default_liabilities(ds.settle)
+    r = service.run_custom(ds, L, {}, {}, {"liab_pct": 20})
+    assert r["status"] == "optimal" and len(r["holdings"]) == r["bonds_used"] and len(r["schedule"]) == 5
+    assert sum(h["cost"] for h in r["holdings"]) == pytest.approx(r["cost"])
+    b = service.run_custom(ds, L, {"budget": 4e7}, {}, {"rate_bp": 50})
+    assert b["status"] == "shortfall" and b["cost"] == pytest.approx(4e7, rel=1e-6)
+
+
+def test_whole_lots_full_run_stays_fast_and_warns_about_overbuying():
+    import time
+    ds = service.load_sample()
+    L = service.default_liabilities(ds.settle)
+    t = time.time()
+    r = service.run(ds, L, {"lot_face": 1e7})
+    assert time.time() - t < 30
+    assert r["status"] == "optimal"
+    assert all(abs(h["lots"] - round(h["lots"])) < 1e-6 for h in r["holdings"])
+    big = service.run(ds, L, {}, {"min_volume": 5000}, full=False)   # only one long bond left
+    assert any("buys more than the payments need" in w for w in big["warnings"])
+
+
+def test_loaded_datasets_are_capped():
+    raw = data.normalise(data.read_ccil_json(LIVE.read_text()))
+    for _ in range(service.MAX_DATASETS + 3):
+        service._register("ccil", "live", raw)
+    assert sum(d.source != "sample" for d in service.DATASETS.values()) <= service.MAX_DATASETS

@@ -98,7 +98,8 @@ export default function App() {
 
   // re-optimise shortly after any input changes
   React.useEffect(() => {
-    if (!body || !liabilities.length) return;
+    if (!body) return;
+    if (!liabilities.length) { reqId.current++; setResult(null); setRunning(false); return; }
     const id = ++reqId.current;
     const t = setTimeout(async () => {
       setRunning(true);
@@ -115,7 +116,8 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bodyKey]);
 
-  const names = React.useMemo(() => Object.fromEntries((result?.universe ?? []).map((b) => [b.isin, b.description])), [result?.universe]);
+  const names = React.useMemo(() => Object.fromEntries(
+    [...(result?.excluded ?? []), ...(result?.universe ?? [])].map((b) => [b.isin, b.description ?? b.isin])), [result?.universe, result?.excluded]);
   const exclude = (isin: string) => {
     setFilters((f) => ({ ...f, exclude: Array.from(new Set([...f.exclude, isin])) }));
     toast(`Excluded ${names[isin] ?? isin}`, { description: "Re-optimising without it" });
@@ -186,7 +188,8 @@ export default function App() {
               </details>
 
               {error && <Alert tone="critical" title="The optimiser could not run">{error}</Alert>}
-              {!result && !error && <LoadingState />}
+              {dataset && !liabilities.length && <Alert tone="info" title="Add at least one future payment">Use the table, a pattern or a CSV in “Future payments” to see a plan.</Alert>}
+              {!result && !error && liabilities.length > 0 && <LoadingState />}
 
               {result && result.status === "infeasible" && (
                 <Alert tone="critical" title="No portfolio can meet these payments">{result.message}</Alert>
